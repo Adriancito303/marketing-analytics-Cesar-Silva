@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
+from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 
@@ -25,15 +26,36 @@ FEATURES = ["recency_days", "frequency", "monetary", "email_open_rate", "tenure_
 
 
 @st.cache_data
+def load_data():
+    # Buscar el archivo CSV desde distintas ubicaciones del repositorio
+    posibles_rutas = [
+        Path(__file__).parent / "data" / "uplift_campaign.csv",
+        Path(__file__).parent.parent / "data" / "uplift_campaign.csv",
+        Path("data/uplift_campaign.csv"),
+        Path("../data/uplift_campaign.csv"),
+    ]
+
+    for ruta in posibles_rutas:
+        if ruta.exists():
+            return pd.read_csv(ruta)
+
+    st.error(
+        "No se encontró data/uplift_campaign.csv. "
+        "Verifica que el archivo esté incluido en el repositorio de GitHub."
+    )
+    st.stop()
+
+
+@st.cache_data
 def entrenar_t_learner(df: pd.DataFrame, test_size: float, seed: int):
     train, test = train_test_split(
         df, test_size=test_size, random_state=seed,
         stratify=df["treatment_group"]
     )
 
+    # TODO: entrenen el T-learner (dos modelos, igual que en el notebook)
     train_t = train[train["treatment_group"] == "treatment"]
     train_c = train[train["treatment_group"] == "control"]
-
     modelo_tratado = LogisticRegression(max_iter=1000).fit(
         train_t[FEATURES], train_t["responded_60d"]
     )
@@ -51,12 +73,19 @@ def entrenar_t_learner(df: pd.DataFrame, test_size: float, seed: int):
 
 def valor_de_la_politica(test_df, seleccionados):
     sel = test_df.loc[seleccionados]
+
+    # Comparar la utilidad neta de los tratados con el margen del grupo control
     valor_tratado = sel.loc[
         sel["treatment_group"] == "treatment", "utilidad_neta_60d"
     ].mean()
     valor_control = sel.loc[
         sel["treatment_group"] == "control", "margin_60d"
     ].mean()
+
+    # Evitar resultados inválidos si alguno de los grupos está vacío
+    if pd.isna(valor_tratado) or pd.isna(valor_control):
+        return 0.0, len(sel)
+
     return valor_tratado - valor_control, len(sel)
 
 
@@ -68,6 +97,19 @@ st.caption(
 )
 
 df = load_data()
+
+# Validar las columnas necesarias antes de entrenar
+columnas_necesarias = FEATURES + [
+    "treatment_group",
+    "responded_60d",
+    "utilidad_neta_60d",
+    "margin_60d"
+]
+faltantes = [col for col in columnas_necesarias if col not in df.columns]
+
+if faltantes:
+    st.error(f"Faltan estas columnas en el CSV: {', '.join(faltantes)}")
+    st.stop()
 
 # --- Parámetros ---
 with st.sidebar:
@@ -82,7 +124,7 @@ with st.sidebar:
 
 train, test = entrenar_t_learner(df, test_size=0.30, seed=42)
 
-# --- Curva Qini ---
+# --- TODO: calculen y grafiquen la curva Qini de su T-learner ---
 test_ordenado = test.sort_values(
     "uplift_estimado", ascending=False
 ).reset_index(drop=True)
@@ -92,41 +134,36 @@ test_ordenado["tratamiento_real"] = (
 ).astype(int)
 
 test_ordenado["respuesta"] = test_ordenado["responded_60d"]
-test_ordenado["control"] = 1 - test_ordenado["tratamiento_real"]
 
 n = len(test_ordenado)
 fracciones = np.arange(1, n + 1) / n
+
+n_tratados = test_ordenado["tratamiento_real"].sum()
+n_controles = n - n_tratados
 
 tratados_acum = (
     test_ordenado["respuesta"] * test_ordenado["tratamiento_real"]
 ).cumsum()
 
 controles_acum = (
-    test_ordenado["respuesta"] * test_ordenado["control"]
+    test_ordenado["respuesta"] * (1 - test_ordenado["tratamiento_real"])
 ).cumsum()
 
-n_tratados = test_ordenado["tratamiento_real"].sum()
-n_controles = n - n_tratados
+factor_control = n_tratados / n_controles if n_controles else 0
+
+qini_modelo = tratados_acum - controles_acum * factor_control
 
 respuesta_tratados = (
     test_ordenado["respuesta"] * test_ordenado["tratamiento_real"]
 ).sum()
 
 respuesta_controles = (
-    test_ordenado["respuesta"] * test_ordenado["control"]
+    test_ordenado["respuesta"] * (1 - test_ordenado["tratamiento_real"])
 ).sum()
-
-tasa_tratamiento = respuesta_tratados / n_tratados if n_tratados else 0
-tasa_control = respuesta_controles / n_controles if n_controles else 0
-
-qini_modelo = tratados_acum - controles_acum * (
-    n_tratados / n_controles if n_controles else 0
-)
 
 qini_aleatorio = (
     fracciones * respuesta_tratados
-    - fracciones * respuesta_controles
-    * (n_tratados / n_controles if n_controles else 0)
+    - fracciones * respuesta_controles * factor_control
 )
 
 st.subheader("Curva Qini")
@@ -136,8 +173,11 @@ st.write(
 )
 
 fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(fracciones, qini_modelo, label="T-learner")
-ax.plot(fracciones, qini_aleatorio, linestyle="--", label="Referencia aleatoria")
+ax.plot(fracciones, qini_modelo, label="T-learner", color=GREEN)
+ax.plot(
+    fracciones, qini_aleatorio,
+    linestyle="--", label="Referencia aleatoria", color=GRAY
+)
 ax.set_xlabel("Proporción acumulada de clientes contactados")
 ax.set_ylabel("Qini acumulado")
 ax.legend()
@@ -145,7 +185,7 @@ ax.grid(alpha=0.3)
 st.pyplot(fig)
 plt.close(fig)
 
-# --- Tabla de políticas ---
+# --- TODO: muestren la tabla de políticas (valor por cliente y total) para el % elegido ---
 st.subheader("Tabla de políticas")
 
 cantidad = max(1, int(len(test_ordenado) * pct_contactar / 100))
@@ -185,4 +225,9 @@ st.dataframe(tabla_politica, use_container_width=True)
 st.caption(
     "Nota: el uplift estimado representa la diferencia de probabilidades "
     "predichas entre tratamiento y control; no garantiza el resultado real."
+)
+
+st.info(
+    "Los resultados dependen de la calidad de los datos y del desempeño "
+    "del modelo. Valida las métricas antes de tomar decisiones de negocio."
 )
