@@ -25,11 +25,6 @@ FEATURES = ["recency_days", "frequency", "monetary", "email_open_rate", "tenure_
 
 
 @st.cache_data
-def load_data():
-    return pd.read_csv("data/uplift_campaign.csv")
-
-
-@st.cache_data
 def entrenar_t_learner(df: pd.DataFrame, test_size: float, seed: int):
     train, test = train_test_split(
         df, test_size=test_size, random_state=seed,
@@ -67,12 +62,14 @@ def valor_de_la_politica(test_df, seleccionados):
 
 # --- Título y carga de datos ---
 st.title("Laboratorio Final — Starbucks Rewards")
-st.caption("Explora qué clientes podrían responder mejor a una campaña y estima "
-    "el valor de contactar a los clientes con mayor uplift.")
+st.caption(
+    "Explora qué clientes podrían responder mejor a una campaña y estima "
+    "el valor de contactar a los clientes con mayor uplift."
+)
 
 df = load_data()
 
-# TODO: agreguen un slider en la barra lateral para el % de la base a contactar
+# --- Parámetros ---
 with st.sidebar:
     st.header("Parámetros")
     pct_contactar = st.slider(
