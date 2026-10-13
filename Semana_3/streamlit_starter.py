@@ -17,6 +17,8 @@ from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+import copy
 
 st.set_page_config(page_title="Laboratorio Final — Starbucks Rewards", page_icon="☕", layout="wide")
 
@@ -46,6 +48,109 @@ def load_data():
     )
     st.stop()
 
+
+@st.cache_data
+def load_full_data():
+    posibles_rutas = [
+        Path(__file__).parent / "uplift_campaign_FULL.csv",
+        Path(__file__).parent / "data" / "uplift_campaign_FULL.csv",
+        Path(__file__).parent.parent / "uplift_campaign_FULL.csv",
+        Path(__file__).parent.parent / "data" / "uplift_campaign_FULL.csv",
+    ]
+
+    for ruta in posibles_rutas:
+        if ruta.exists():
+            return pd.read_csv(ruta)
+
+    return None
+
+
+def calcular_qini(test_df, score):
+    orden = test_df.copy()
+    orden["_score"] = np.asarray(score)
+    orden = orden.sort_values("_score", ascending=False).reset_index(drop=True)
+
+    es_t = (orden["treatment_group"] == "treatment").to_numpy()
+    y = orden["responded_60d"].to_numpy()
+
+    n_t = es_t.sum()
+    n_c = len(es_t) - n_t
+
+    if n_t == 0 or n_c == 0:
+        return np.nan
+
+    acumulado_t = np.cumsum(np.where(es_t, y, 0))
+    acumulado_c = np.cumsum(np.where(~es_t, y, 0))
+
+    n = len(orden)
+    xs = [0.0]
+    ys = [0.0]
+
+    for i in np.linspace(1, n, 40).astype(int):
+        tasa_t = acumulado_t[i - 1] / es_t[:i].sum() if es_t[:i].sum() else 0
+        tasa_c = acumulado_c[i - 1] / (~es_t[:i]).sum() if (~es_t[:i]).sum() else 0
+        xs.append(i / n)
+        ys.append((tasa_t - tasa_c) * n)
+
+    xs = np.array(xs)
+    ys = np.array(ys)
+
+    area_modelo = np.trapezoid(ys, xs)
+    area_azar = np.trapezoid(np.linspace(0, ys[-1], len(xs)), xs)
+
+    return (area_modelo - area_azar) / n
+
+
+def comparar_modelos_streamlit(train, test, full):
+    modelos = {
+        "Logística (la del notebook)": LogisticRegression(max_iter=1000),
+        "Árbol sin límite": DecisionTreeClassifier(random_state=42),
+        "Árbol con max_depth=2": DecisionTreeClassifier(
+            max_depth=2, random_state=42
+        ),
+        "Bosque aleatorio": RandomForestClassifier(
+            n_estimators=100,
+            min_samples_leaf=10,
+            random_state=42,
+            n_jobs=-1
+        )
+    }
+
+    resultados = []
+    train_t = train[train["treatment_group"] == "treatment"]
+    train_c = train[train["treatment_group"] == "control"]
+
+    # Alinear la referencia verdadera con los clientes de prueba
+    referencia = full[["customer_id", "true_uplift_prob"]].drop_duplicates(
+        "customer_id"
+    )
+    evaluacion = test.merge(referencia, on="customer_id", how="inner")
+
+    for nombre, base in modelos.items():
+        modelo_t = copy.deepcopy(base)
+        modelo_c = copy.deepcopy(base)
+
+        modelo_t.fit(train_t[FEATURES], train_t["responded_60d"])
+        modelo_c.fit(train_c[FEATURES], train_c["responded_60d"])
+
+        uplift = (
+            modelo_t.predict_proba(evaluacion[FEATURES])[:, 1]
+            - modelo_c.predict_proba(evaluacion[FEATURES])[:, 1]
+        )
+
+        correlacion = pd.Series(uplift).corr(
+            evaluacion["true_uplift_prob"].reset_index(drop=True)
+        )
+
+        qini = calcular_qini(evaluacion, uplift)
+
+        resultados.append({
+            "Modelo dentro del T-learner": nombre,
+            "Correlación con el uplift real": correlacion,
+            "Qini": qini
+        })
+
+    return pd.DataFrame(resultados)
 
 @st.cache_data
 def entrenar_t_learner(df: pd.DataFrame, test_size: float, seed: int):
