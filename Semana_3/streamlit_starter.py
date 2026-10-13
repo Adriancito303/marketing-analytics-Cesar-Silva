@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier
 
 st.set_page_config(page_title="Laboratorio Final — Starbucks Rewards", page_icon="☕", layout="wide")
 
@@ -89,6 +90,102 @@ def valor_de_la_politica(test_df, seleccionados):
     return valor_tratado - valor_control, len(sel)
 
 
+def evaluar_modelo_t_learner(train, test, modelo_base):
+    """Entrena dos modelos y calcula el uplift estimado en prueba."""
+    train_t = train[train["treatment_group"] == "treatment"]
+    train_c = train[train["treatment_group"] == "control"]
+
+    # Crear modelos independientes para tratamiento y control
+    import copy
+    modelo_t = copy.deepcopy(modelo_base)
+    modelo_c = copy.deepcopy(modelo_base)
+
+    modelo_t.fit(train_t[FEATURES], train_t["responded_60d"])
+    modelo_c.fit(train_c[FEATURES], train_c["responded_60d"])
+
+    p_t = modelo_t.predict_proba(test[FEATURES])[:, 1]
+    p_c = modelo_c.predict_proba(test[FEATURES])[:, 1]
+    uplift = p_t - p_c
+
+    return uplift
+
+
+def calcular_qini(test, uplift):
+    """Calcula la curva Qini y su área sobre la referencia aleatoria."""
+    evaluacion = test[
+        ["treatment_group", "responded_60d"]
+    ].copy().reset_index(drop=True)
+
+    evaluacion["uplift"] = np.asarray(uplift)
+    evaluacion = evaluacion.sort_values(
+        "uplift", ascending=False
+    ).reset_index(drop=True)
+
+    es_t = (
+        evaluacion["treatment_group"] == "treatment"
+    ).astype(int).to_numpy()
+
+    es_c = 1 - es_t
+    y = evaluacion["responded_60d"].to_numpy()
+
+    n_t = es_t.sum()
+    n_c = es_c.sum()
+    n = len(evaluacion)
+
+    if n_t == 0 or n_c == 0 or n == 0:
+        return np.nan
+
+    ganancia_t = np.cumsum(y * es_t)
+    ganancia_c = np.cumsum(y * es_c)
+
+    curva = ganancia_t - ganancia_c * (n_t / n_c)
+
+    # Referencia aleatoria que conecta el origen con el resultado final
+    x = np.arange(1, n + 1) / n
+    curva_aleatoria = x * curva[-1]
+
+    # Qini: área entre la curva del modelo y la referencia aleatoria,
+    # normalizada por el tamaño de la muestra.
+    return float(
+        np.trapezoid(curva - curva_aleatoria, x=x) / n
+    )
+
+
+def comparar_modelos(train, test, df):
+    """Compara distintos clasificadores dentro de un T-learner."""
+    modelos = {
+        "Logística": LogisticRegression(max_iter=1000),
+        "Árbol sin límite": DecisionTreeClassifier(
+            random_state=42
+        ),
+        "Árbol max_depth=2": DecisionTreeClassifier(
+            max_depth=2, random_state=42
+        )
+    }
+
+    resultados = []
+
+    for nombre, modelo in modelos.items():
+        uplift = evaluar_modelo_t_learner(train, test, modelo)
+        qini = calcular_qini(test, uplift)
+
+        # Solo calcular correlación si existe una referencia real
+        if "uplift_real" in test.columns:
+            correlacion = pd.Series(uplift).corr(
+                test["uplift_real"].reset_index(drop=True)
+            )
+        else:
+            correlacion = np.nan
+
+        resultados.append({
+            "Modelo dentro del T-learner": nombre,
+            "Correlación con el uplift real": correlacion,
+            "Qini": qini
+        })
+
+    return pd.DataFrame(resultados)
+
+
 # --- Título y carga de datos ---
 st.title("Laboratorio Final — Starbucks Rewards")
 st.caption(
@@ -125,6 +222,30 @@ with st.sidebar:
 train, test = entrenar_t_learner(df, test_size=0.30, seed=42)
 
 # --- TODO: calculen y grafiquen la curva Qini de su T-learner ---
+
+# --- Comparación de modelos ---
+st.subheader("Comparación de modelos de clasificación")
+st.write(
+    "Comparamos distintos modelos usando el mismo conjunto de prueba "
+    "para identificar cuál prioriza mejor a los clientes según su uplift."
+)
+
+tabla_modelos = comparar_modelos(train, test, df)
+
+st.dataframe(
+    tabla_modelos.round(4),
+    use_container_width=True,
+    hide_index=True
+)
+
+if "uplift_real" not in test.columns:
+    st.info(
+        "El dataset no contiene la columna 'uplift_real'. "
+        "La correlación con el uplift real no puede calcularse con "
+        "estos datos. El Qini se calcula usando las respuestas "
+        "observadas de tratamiento y control."
+    )
+
 test_ordenado = test.sort_values(
     "uplift_estimado", ascending=False
 ).reset_index(drop=True)
